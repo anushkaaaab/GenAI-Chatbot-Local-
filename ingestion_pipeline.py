@@ -2,7 +2,7 @@ import os
 from langchain_community.document_loaders import TextLoader, DirectoryLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_ollama.llms import OllamaLLM
-from langchain_ollama import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
@@ -41,25 +41,41 @@ def load_documents(docs_path="docs"):
 
 def split_documents(documents, chunk_size = 800, chunk_overlap = 0):
 
-    textSplitter = CharacterTextSplitter (
-        chunk_overlap = chunk_overlap,
-        chunk_size = chunk_size
-    )
+    llm = ChatOllama(model="llama3.2")
 
-    chunks = textSplitter.split_documents(documents)
+    prompt = f"""
+    You are a text chunking expert. Split this text into logical chunks.
 
-    if chunks:
-        for i, chunk in enumerate(chunks[:5]):
-            print(f"\n--- Chunk {i+1} ---")
-            print(f"Source: {chunk.metadata['source']}")
-            print(f"Length: {len(chunk.page_content)} characters")
-            print(f"Content:")
-            print(chunk.page_content)
-            print("-" * 50)
-        
-        if len(chunks) > 5:
-            print(f"\n... and {len(chunks) - 5} more chunks")
+    Rules:
+    - Each chunk should be around 200 characters or less
+    - Split at natural topic boundaries
+    - Keep related information together
+    - Put "<<<SPLIT>>>" between chunks
 
+    Text:
+    {documents}
+
+    Return the text with <<<SPLIT>>> markers where you want to split:
+    """
+    print("Asking AI to chunk the text...")
+    response = llm.invoke(prompt)
+    marked_text = response.content
+
+    chunks = marked_text.split("<<<SPLIT>>>")
+
+    clean_chunks = []
+    for chunk in chunks:
+        cleaned = chunk.strip()
+        if cleaned:
+            clean_chunks.append(cleaned)
+    
+    print("\nAGENTIC CHUNKING RESULTS:")
+
+    for i, chunk in enumerate(clean_chunks, 1):
+        print(f"Chunk {i}: ({len(chunk)} chars)")
+        print(f'"{chunk}"')
+        print()
+    
     return chunks
 
 def create_vector_store(chunks, persist_directory = "db/chroma_db"):
@@ -74,12 +90,12 @@ def create_vector_store(chunks, persist_directory = "db/chroma_db"):
         collection_metadata= {"hnsw:space":"cosine"}
     )
 
-    batch_size = 100
+    # batch_size = 100
 
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        print(f"Adding batch {i//batch_size + 1}")
-        vectorStore.add_documents(batch)
+    # for i in range(0, len(chunks), batch_size):
+    #     batch = chunks[i:i+batch_size]
+    #     print(f"Adding batch {i//batch_size + 1}")
+    #     vectorStore.add_documents(batch)
 
 
     print("--- Finished creating vector store ---")
