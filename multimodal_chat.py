@@ -1,4 +1,7 @@
 import json
+import hashlib
+import os
+import shutil
 from typing import List
 from unstructured.partition.pdf import partition_pdf
 from unstructured.chunking.title import chunk_by_title
@@ -6,17 +9,32 @@ from langchain_core.documents import Document
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
 
-persistent_directory = "db/chroma_db"
-embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+persist_directory = "db/chroma_db"
+if os.path.exists(persist_directory):
+    shutil.rmtree(persist_directory)
+
+embeddings = OllamaEmbeddings(model="nomic-embed-text")
+
 llm = ChatOllama(
     model="llama3.2",
     temperature=0
 )
+
 chat_history = []
+
+CACHE_FILE = "summary_cache.json"
+
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "r", encoding="utf-8") as f:
+        summary_cache = json.load(f)
+else:
+    summary_cache = {}
+
 
 def partition_document(file_path: str):
     print("Loading...")
@@ -69,6 +87,11 @@ def separate_content_types(chunk):
     return content_data
 
 def create_ai_enhanced_summary(text: str, tables: List[str], images: List[str]) -> str:
+
+    chunk_hash = hashlib.md5((text + "".join(tables) + "".join(images)).encode("utf-8")).hexdigest()
+
+    if chunk_hash in summary_cache:
+        return summary_cache[chunk_hash]
     
     try:
 
@@ -116,6 +139,11 @@ TEXT
         message = HumanMessage(content=message_content)
         response = llm.invoke([message])
                 
+        summary_cache[chunk_hash] = response.content
+
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(summary_cache, f, indent=2)
+
         return response.content
         
     except Exception as e:
@@ -128,56 +156,40 @@ TEXT
             summary += f" [Contains {len(images)} image(s)]"
         return summary
     
+def process_chunk(chunk):
+    content_data = separate_content_types(chunk)
+
+    if content_data["tables"] or content_data["images"]:
+        try:
+            enhanced_content = create_ai_enhanced_summary(
+                content_data["text"],
+                content_data["tables"],
+                content_data["images"],
+            )
+        except Exception:
+            enhanced_content = content_data["text"]
+    else:
+        enhanced_content = content_data["text"]
+
+    return Document(
+        page_content=enhanced_content,
+        metadata={
+            "original_content": json.dumps(
+                {
+                    "raw_text": content_data["text"],
+                    "tables_html": content_data["tables"],
+                    "images_base64": content_data["images"],
+                }
+            )
+        },
+    )
+
+
 def summarise_chunks(chunks):
-    #print("Processing chunks with AI Summaries...")
-    
-    langchain_documents = []
-    total_chunks = len(chunks)
-    
-    for i, chunk in enumerate(chunks):
-        current_chunk = i + 1
-        #print(f"   Processing chunk {current_chunk}/{total_chunks}")
-        
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        documents = list(executor.map(process_chunk, chunks))
 
-        content_data = separate_content_types(chunk)
-        
-
-        #print(f"     Types found: {content_data['types']}")
-        #print(f"     Tables: {len(content_data['tables'])}, Images: {len(content_data['images'])}")
-        
-
-        if content_data['tables'] or content_data['images']:
-
-            try:
-                enhanced_content = create_ai_enhanced_summary(
-                    content_data['text'],
-                    content_data['tables'], 
-                    content_data['images']
-                )
-
-            except Exception as e:
-                enhanced_content = content_data['text']
-        else:
-            enhanced_content = content_data['text']
-        
-
-        doc = Document(
-            page_content=enhanced_content,
-            metadata={
-                "original_content": json.dumps
-                (
-                    {
-                        "raw_text": content_data['text'],
-                        "tables_html": content_data['tables'],
-                        "images_base64": content_data['images']
-                    }
-                )
-            }
-        )
-        
-        langchain_documents.append(doc)
-    
-    return langchain_documents
+    return documents
 
 
 def export_chunks_to_json(chunks, filename="chunks_export.json"):
@@ -222,7 +234,10 @@ def run_complete_ingestion_pipeline(pdf_path: str):
     return db
 
 db = run_complete_ingestion_pipeline("./docs/attention-is-all-you-need.pdf")
-
+retriever = db.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 4, "fetch_k": 12},
+)
 def ask_question(user_question):
     print(f"\n--- You asked: {user_question} ---")
     
@@ -240,7 +255,7 @@ def ask_question(user_question):
     else:
         search_question = user_question
 
-    retriever = db.as_retriever(search_kwargs={"k": 3})
+    # retriever = db.as_retriever(search_kwargs={"k": 3})
     docs = retriever.invoke(search_question)
     
     print(f"Found {len(docs)} relevant documents:")
