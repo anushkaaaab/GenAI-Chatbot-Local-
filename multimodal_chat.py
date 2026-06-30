@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-persist_directory = "db/chroma_db"
-if os.path.exists(persist_directory):
-    shutil.rmtree(persist_directory)
+persistent_directory = "db/chroma_db"
+if os.path.exists(persistent_directory):
+    shutil.rmtree(persistent_directory)
 
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
@@ -25,7 +25,12 @@ llm = ChatOllama(
     temperature=0
 )
 
-chat_history = []
+def load_vectorstore():
+    return Chroma(
+        persist_directory=persistent_directory,
+        embedding_function=embeddings
+    )
+
 
 CACHE_FILE = "summary_cache.json"
 
@@ -238,7 +243,7 @@ retriever = db.as_retriever(
     search_type="mmr",
     search_kwargs={"k": 4, "fetch_k": 12},
 )
-def ask_question(user_question):
+def ask_question(user_question, db, chat_history):
     print(f"\n--- You asked: {user_question} ---")
     
     if chat_history:
@@ -258,12 +263,11 @@ def ask_question(user_question):
     # retriever = db.as_retriever(search_kwargs={"k": 3})
     docs = retriever.invoke(search_question)
     
-    print(f"Found {len(docs)} relevant documents:")
-    for i, doc in enumerate(docs, 1):
-        # Show first 2 lines of each document
-        lines = doc.page_content.split('\n')[:2]
-        preview = '\n'.join(lines)
-        print(f"  Doc {i}: {preview}...")
+    # print(f"Found {len(docs)} relevant documents:")
+    # for i, doc in enumerate(docs, 1):
+    #     lines = doc.page_content.split('\n')[:2]
+    #     preview = '\n'.join(lines)
+    #     print(f"  Doc {i}: {preview}...")
 
     combined_input = f"""Based on the following documents, please answer this question: {user_question}
 
@@ -286,19 +290,5 @@ def ask_question(user_question):
     chat_history.append(AIMessage(content=answer))
     
     print(f"Answer: {answer}")
-    return answer
+    return answer, docs
 
-def start_chat():
-    print("Ask me questions! Type 'quit' to exit.")
-    
-    while True:
-        question = input("\nYour question: ")
-        
-        if question.lower() == 'quit':
-            print("Goodbye!")
-            break
-            
-        ask_question(question)
-
-if __name__ == "__main__":
-    start_chat()
